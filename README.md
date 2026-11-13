@@ -14,3 +14,5 @@ workflow. Only the `stub` harness is included; it calls no model.
 - `.github/agent-review/`: driver, stub adapter, AWF configuration, prompt.
 - `MARKER`: changes between commits, so a caller can prove which commit of
   this repository a run used.
+
+Self-test fixture edit.
