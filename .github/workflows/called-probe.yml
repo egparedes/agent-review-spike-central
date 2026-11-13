@@ -82,6 +82,19 @@ jobs:
           echo "--- vars.AGENT_REVIEW_HARNESS (caller repo variable) = '${VAR_HARNESS}'"
           echo "workflow_sha=${JOB_WF_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Secrets in a job WITHOUT environment (sha256 prefixes only)
+        env:
+          S_ENV_ONLY: ${{ secrets.AGENT_REVIEW_INFERENCE_API_KEY }}
+          S_SHARED: ${{ secrets.SPIKE_SHARED }}
+          S_MAPPED_KEY: ${{ secrets.inference_api_key }}
+          S_MAPPED_SHARED: ${{ secrets.shared_mapped }}
+        run: |
+          h() { if [ -z "$1" ]; then echo "<empty>"; else printf '%s' "$1" | sha256sum | cut -c1-12; fi; }
+          echo "no-env job: secrets.AGENT_REVIEW_INFERENCE_API_KEY: $(h "${S_ENV_ONLY}")"
+          echo "no-env job: secrets.SPIKE_SHARED:                   $(h "${S_SHARED}")"
+          echo "no-env job: secrets.inference_api_key (mapped):     $(h "${S_MAPPED_KEY}")"
+          echo "no-env job: secrets.shared_mapped (mapped):         $(h "${S_MAPPED_SHARED}")"
+
       - name: Resolve own repository with the self-repository syntax
         uses: $/.github/actions/whoami
 
