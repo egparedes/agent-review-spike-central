@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Guards the reset invariant in the reusable form: every file the prompt tells
+# the agent to FOLLOW must be reset to its base version before the run. Rule
+# files come from the caller ('rule_files') and are reset by construction;
+# files named in the caller's prompt addendum must be covered by some reset
+# pattern, or run-review fails closed before touching the PR.
+#
+# Offline, no network. Run: bash tests/test-instruction-coverage.sh
+
+set -uo pipefail
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+AR_DIR=$(cd "$(dirname "$0")/.." && pwd)
+
+setup() { # rule-files addendum
+  mkdir -p root/config ws/in
+  cp -r "${AR_DIR}/bin" "${AR_DIR}/harnesses" "${AR_DIR}/prompt.md.tmpl" "${AR_DIR}/instruction-files.txt" root/
+  bash root/harnesses/stub/install.sh root/harness/stub
+  printf '%s\n' "$1" >root/config/rule-files.txt
+  : >root/config/extra-instruction-files.txt
+  printf '%s\n' "$2" >root/config/prompt-addendum.md
+  jq -n '{repo: "example-org/example", pr: 1, head_sha: ("a" * 40), base_sha: ("b" * 40),
+          harness: "stub", model: "none", harness_timeout_minutes: 5, project: "Example"}' >ws/in/params.json
+}
+
+test_addendum_naming_a_rule_file_passes() {
+  setup $'AGENTS.md\nCODING_GUIDELINES.md' 'Also follow `CODING_GUIDELINES.md` and `src/pkg/AGENTS.md`.'
+  # Passes the coverage check, then stops because no fetch phase ran.
+  ! bash root/bin/run-review --phase review "${TMP}/ws" >log 2>&1 &&
+    assert "got past the coverage check" grep -q "run the fetch phase first" log
+}
+
+test_addendum_naming_an_unreset_file_fails_closed() {
+  setup 'AGENTS.md' 'Follow `docs/style.md` for naming.'
+  ! bash root/bin/run-review --phase review "${TMP}/ws" >log 2>&1 &&
+    assert "names the uncovered file" grep -q "names 'docs/style.md', which no reset pattern covers" log
+}
+
+test_invalid_rule_file_is_rejected() {
+  setup '../etc/passwd' ''
+  ! bash root/bin/run-review --phase review "${TMP}/ws" >log 2>&1 &&
+    assert "rejects the entry" grep -q "Invalid configured path or pattern" log
+}
+
+run_test test_addendum_naming_a_rule_file_passes
+run_test test_addendum_naming_an_unreset_file_fails_closed
+run_test test_invalid_rule_file_is_rejected
+summary

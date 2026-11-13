@@ -1,0 +1,21 @@
+name: Called probe with a tag-pinned action
+
+# Throwaway spike: does the CALLER repo's "require full-length SHA pinning"
+# setting apply to actions used inside a called workflow?
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  unpinned:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: echo "tag-pinned action inside the called workflow ran"

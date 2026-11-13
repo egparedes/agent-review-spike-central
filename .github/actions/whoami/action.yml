@@ -1,0 +1,18 @@
+name: whoami
+description: Spike probe. Reports where '$/' resolved this action from.
+runs:
+  using: composite
+  steps:
+    - name: Where am I
+      shell: bash
+      env:
+        ACTION_REPO: ${{ github.action_repository }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        echo "github.action_repository='${ACTION_REPO}'"
+        echo "github.action_ref='${ACTION_REF}'"
+        echo "github.action_path='${ACTION_PATH}'"
+        root=$(cd "${ACTION_PATH}/../../.." && pwd)
+        echo "MARKER via \$/ action_path: $(cat "${root}/MARKER" 2>&1)"
+        echo "agent-review files next to it: $(ls "${root}/.github/agent-review" 2>&1 | tr '\n' ' ')"

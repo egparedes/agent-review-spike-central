@@ -1,0 +1,203 @@
+name: Called probe
+
+# Throwaway design spike: what a called workflow sees about itself, its
+# caller's environment, secrets and token. Prints no secret: only sha256
+# prefixes of dummy values, and OIDC claims (never the token).
+
+on:
+  workflow_call:
+    inputs:
+      variant:
+        description: Label of the caller variant, for the log
+        type: string
+        required: true
+      pr:
+        description: PR/issue number to attempt comment writes on
+        type: string
+        default: ""
+      environment:
+        type: string
+        default: agent-review
+      oidc:
+        type: boolean
+        default: false
+      write_job:
+        description: Run the job that requests pull-requests write
+        type: boolean
+        default: false
+    secrets:
+      inference_api_key:
+        required: false
+      shared_mapped:
+        required: false
+    outputs:
+      workflow_sha:
+        description: job.workflow_sha as seen by the called workflow
+        value: ${{ jobs.context.outputs.workflow_sha }}
+
+permissions: {}
+
+jobs:
+  context:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      workflow_sha: ${{ steps.ctx.outputs.workflow_sha }}
+    steps:
+      - name: Contexts
+        id: ctx
+        env:
+          VARIANT: ${{ inputs.variant }}
+          JOB_CTX: ${{ toJSON(job) }}
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_REF: ${{ github.ref }}
+          GH_SHA: ${{ github.sha }}
+          GH_REPO: ${{ github.repository }}
+          GH_WF_REF: ${{ github.workflow_ref }}
+          GH_WF_SHA: ${{ github.workflow_sha }}
+          GH_WORKFLOW: ${{ github.workflow }}
+          GH_JOB_WF_SHA: ${{ github.job_workflow_sha }}
+          JOB_WF_REF: ${{ job.workflow_ref }}
+          JOB_WF_SHA: ${{ job.workflow_sha }}
+          JOB_WF_REPO: ${{ job.workflow_repository }}
+          JOB_WF_PATH: ${{ job.workflow_file_path }}
+          VAR_HARNESS: ${{ vars.AGENT_REVIEW_HARNESS }}
+          GH_CTX_KEYS: ${{ toJSON(github) }}
+        run: |
+          echo "variant=${VARIANT}"
+          echo "--- toJSON(job)"; printf '%s\n' "${JOB_CTX}"
+          echo "--- github.*"
+          printf 'event_name=%s\nref=%s\nsha=%s\nrepository=%s\nworkflow_ref=%s\nworkflow_sha=%s\nworkflow=%s\n' \
+            "${GH_EVENT_NAME}" "${GH_REF}" "${GH_SHA}" "${GH_REPO}" "${GH_WF_REF}" "${GH_WF_SHA}" "${GH_WORKFLOW}"
+          echo "github.job_workflow_sha='${GH_JOB_WF_SHA}'"
+          echo "--- job.workflow_*"
+          printf 'job.workflow_ref=%s\njob.workflow_sha=%s\njob.workflow_repository=%s\njob.workflow_file_path=%s\n' \
+            "${JOB_WF_REF}" "${JOB_WF_SHA}" "${JOB_WF_REPO}" "${JOB_WF_PATH}"
+          echo "--- keys of the github context"
+          printf '%s' "${GH_CTX_KEYS}" | jq -r 'keys | join(" ")'
+          echo "--- GITHUB_* env (no token)"
+          env | grep -E '^(GITHUB_|RUNNER_)' | grep -v -E 'TOKEN|URL=' | sort
+          echo "--- vars.AGENT_REVIEW_HARNESS (caller repo variable) = '${VAR_HARNESS}'"
+          echo "workflow_sha=${JOB_WF_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve own repository with the self-repository syntax
+        uses: $/.github/actions/whoami
+
+      - name: Fetch own files at job.workflow_sha (caller token, tarball API)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+        run: |
+          [[ "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::no job.workflow_repository"; exit 1; }
+          [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no job.workflow_sha"; exit 1; }
+          mkdir -p "${RUNNER_TEMP}/own"
+          gh api "repos/${REPO}/tarball/${SHA}" > "${RUNNER_TEMP}/own.tgz"
+          tar -xzf "${RUNNER_TEMP}/own.tgz" -C "${RUNNER_TEMP}/own" --strip-components=1
+          echo "MARKER via tarball+caller token: $(cat "${RUNNER_TEMP}/own/MARKER")"
+
+      - name: Fetch own files without a token (codeload)
+        continue-on-error: true
+        env:
+          REPO: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/own2"
+          curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/${SHA}" | tar -xz -C "${RUNNER_TEMP}/own2" --strip-components=1
+          echo "MARKER via codeload, no token: $(cat "${RUNNER_TEMP}/own2/MARKER")"
+
+      - name: Fetch own files with actions/checkout
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: own-checkout
+          persist-credentials: false
+
+      - name: Show checkout marker
+        continue-on-error: true
+        run: echo "MARKER via actions/checkout - $(cat own-checkout/MARKER)"
+
+      - name: Caller config at the caller's workflow_sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.workflow_sha }}
+        run: |
+          gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/${REPO}/contents/.github/agent-review/prompt-addendum.md?ref=${SHA}" | head -n 3 || echo "no addendum"
+
+      - name: Try a write with this job's read-only token
+        if: inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          if out=$(gh api -X POST "repos/${REPO}/issues/${PR}/comments" -f body="spike: read-only job write attempt (${VARIANT})" 2>&1); then
+            echo "::warning::read-only job COULD write: ${out}"
+          else
+            echo "read-only job write denied as expected: ${out}"
+          fi
+
+  oidc:
+    if: inputs.oidc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    steps:
+      - name: OIDC claims (never the token)
+        run: |
+          set -o pipefail
+          tok=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=agent-review-spike" | jq -r .value)
+          payload=$(cut -d. -f2 <<< "${tok}" | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="${payload}="; done
+          base64 -d <<< "${payload}" | jq '{job_workflow_ref, job_workflow_sha, workflow_ref, workflow_sha,
+            ref, sha, repository, repository_owner, event_name, environment, runner_environment}'
+
+  env:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    steps:
+      - name: Secrets (sha256 prefixes of dummy values only)
+        env:
+          VARIANT: ${{ inputs.variant }}
+          S_ENV_ONLY: ${{ secrets.AGENT_REVIEW_INFERENCE_API_KEY }}
+          S_SHARED: ${{ secrets.SPIKE_SHARED }}
+          S_MAPPED_KEY: ${{ secrets.inference_api_key }}
+          S_MAPPED_SHARED: ${{ secrets.shared_mapped }}
+          JOB_WF_SHA: ${{ job.workflow_sha }}
+          GH_REF: ${{ github.ref }}
+        run: |
+          h() { if [ -z "$1" ]; then echo "<empty>"; else printf '%s' "$1" | sha256sum | cut -c1-12; fi; }
+          echo "variant=${VARIANT} ref=${GH_REF} job.workflow_sha=${JOB_WF_SHA}"
+          echo "secrets.AGENT_REVIEW_INFERENCE_API_KEY (env-only name): $(h "${S_ENV_ONLY}")"
+          echo "secrets.SPIKE_SHARED (repo+env names):                 $(h "${S_SHARED}")"
+          echo "secrets.inference_api_key (mapped by caller):          $(h "${S_MAPPED_KEY}")"
+          echo "secrets.shared_mapped (mapped by caller):              $(h "${S_MAPPED_SHARED}")"
+
+  write:
+    if: inputs.write_job && inputs.pr != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Write with this job's token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          gh api -X POST "repos/${REPO}/issues/${PR}/comments" -f body="spike: write job comment (${VARIANT})" --jq .html_url

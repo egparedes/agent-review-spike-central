@@ -1,0 +1,61 @@
+name: Self-test
+
+# The central repository's own CI: offline script tests, and the whole
+# pipeline end to end with the 'stub' harness (no key, no model call) through
+# a LOCAL call, so the commit under test is exactly the one reviewed. Under
+# 'pull_request' the PR reviews itself and the run is forced to dry-run.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request of this repository to review (dry run)
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Offline tests
+        run: |
+          rc=0
+          for t in test-collect-result test-publish-comment test-instruction-coverage; do
+            bash ".github/agent-review/tests/${t}.sh" || rc=1
+          done
+          exit "${rc}"
+
+  e2e:
+    uses: ./.github/workflows/review.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      harness: stub
+      pr: ${{ inputs.pr }}
+      dry_run: true
+      environment: agent-review-selftest
+      rule_files: |
+        AGENTS.md
+
+  check:
+    needs: e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: The stub review was rendered
+        env:
+          RESULT: ${{ needs.e2e.outputs.result }}
+          HEAD_SHA: ${{ needs.e2e.outputs.head_sha }}
+        run: |
+          echo "result='${RESULT}' head_sha='${HEAD_SHA}'"
+          [ "${RESULT}" = dry-run ]
